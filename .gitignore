@@ -1,0 +1,53 @@
+# Audio & Media files
+*.mp3
+*.webm
+*.m4a
+*.wav
+*.flac
+*.ogg
+
+# SQLite database & local state
+*.db
+*.sqlite
+*.sqlite3
+
+# Playlists
+*.m3u
+*.m3u8
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+
+# OS / IDE
+.DS_Store
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/
+*.swp
+*.swo

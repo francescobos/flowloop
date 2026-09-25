@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowloop"
+version = "0.1.0"
+description = "Continuous background music & ambient soundscape hub for deep focus and work"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Francesco Boschetti" }
+]
+keywords = ["background-music", "focus", "deep-work", "ambient", "cli", "sqlite", "music-player", "youtube-dl"]
+dependencies = [
+    "yt-dlp>=2024.0.0"
+]
+
+[project.scripts]
+flowloop = "flowloop:main"
