@@ -19,6 +19,7 @@ from pathlib import Path
 
 __version__ = "0.1.0"
 BASE_DIR = Path(__file__).resolve().parent
+AUDIO_DIR = BASE_DIR / "audio"
 DB_PATH = BASE_DIR / "catalog.db"
 
 
@@ -29,6 +30,7 @@ def get_db():
 
 
 def init_db():
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     with get_db() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS tracks (
@@ -137,28 +139,29 @@ def download_track(url: str, custom_title: str = None, custom_moods: str = None,
 
     safe_title = sanitize_filename(title)
     mp3_filename = f"{safe_title}.mp3"
-    mp3_path = BASE_DIR / mp3_filename
+    mp3_path = AUDIO_DIR / mp3_filename
 
     print(f"[+] Title: {title}")
     print(f"[+] Artist/Channel: {uploader}")
     print(f"[+] Duration: {format_duration(duration)}")
     print(f"[+] Mood / Tags: {moods_str}")
     print(f"[+] Energy Level: {energy_level}")
-    print(f"[*] Downloading audio stream & converting to high quality MP3...")
+    print(f"[*] Downloading audio stream & converting to high quality MP3 into audio/...")
 
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     cmd = [
         "yt-dlp",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",
         "--embed-metadata",
-        "-o", str(BASE_DIR / f"{safe_title}.%(ext)s"),
+        "-o", str(AUDIO_DIR / f"{safe_title}.%(ext)s"),
         url
     ]
     subprocess.run(cmd, check=True)
 
     if not mp3_path.exists():
-        candidates = list(BASE_DIR.glob(f"*{yt_id}*.mp3")) or list(BASE_DIR.glob(f"{safe_title}*.mp3"))
+        candidates = list(AUDIO_DIR.glob(f"*{yt_id}*.mp3")) or list(AUDIO_DIR.glob(f"{safe_title}*.mp3"))
         if candidates:
             mp3_path = candidates[0]
             mp3_filename = mp3_path.name
@@ -166,6 +169,7 @@ def download_track(url: str, custom_title: str = None, custom_moods: str = None,
             raise FileNotFoundError(f"Could not find generated MP3 file: {mp3_filename}")
 
     now = datetime.datetime.now().isoformat()
+    relative_filepath = f"audio/{mp3_filename}"
     with get_db() as conn:
         conn.execute("""
             INSERT INTO tracks (
@@ -188,7 +192,7 @@ def download_track(url: str, custom_title: str = None, custom_moods: str = None,
             title,
             uploader,
             mp3_filename,
-            str(mp3_path),
+            relative_filepath,
             duration,
             format_duration(duration),
             yt_id,
@@ -300,9 +304,15 @@ def play_tracks(
     while True:
         track = random.choice(track_list) if not track_id else track_list[0]
 
-        filepath = BASE_DIR / track["filename"]
-        if not filepath.exists():
-            filepath = Path(track["filepath"])
+        filepath = AUDIO_DIR / track["filename"]
+        if not filepath.exists() and track["filepath"]:
+            cand = BASE_DIR / track["filepath"]
+            if cand.exists():
+                filepath = cand
+            elif Path(track["filepath"]).exists():
+                filepath = Path(track["filepath"])
+        if not filepath.exists() and (BASE_DIR / track["filename"]).exists():
+            filepath = BASE_DIR / track["filename"]
         
         if not filepath.exists():
             print(f"[!] File not found on disk: {track['filename']}")
@@ -387,7 +397,8 @@ def export_playlist(output_file: str = "playlist.m3u", mood: str = None, energy:
         f.write("#EXTM3U\n")
         for r in rows:
             f.write(f"#EXTINF:{r['duration_seconds']},{r['artist']} - {r['title']}\n")
-            f.write(f"{r['filename']}\n")
+            rel_entry = r["filepath"] if r["filepath"] else f"audio/{r['filename']}"
+            f.write(f"{rel_entry}\n")
 
     print(f"[✓] Playlist exported to: {out_path} ({len(rows)} tracks)")
 
