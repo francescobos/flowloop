@@ -97,6 +97,19 @@ flowloop play --once
 flowloop export -o deep_focus.m3u --mood focus
 ```
 
+### Remove tracks & clean up audio
+
+```bash
+# Remove a track from catalog and move audio file to macOS Trash:
+flowloop remove 1
+
+# Or remove all tracks:
+flowloop remove --all
+
+# Or remove from catalog database while keeping file on disk:
+flowloop remove 1 --keep-file
+```
+
 ---
 
 ## ⌨️ Interactive Controls (via `mpv`)

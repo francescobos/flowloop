@@ -428,6 +428,64 @@ def update_tags(track_id: int, moods: str = None, energy: str = None, title: str
     print(f"    Energy: {new_energy}")
 
 
+def resolve_track_path(track) -> Path:
+    filepath = AUDIO_DIR / track["filename"]
+    if not filepath.exists() and track["filepath"]:
+        cand = BASE_DIR / track["filepath"]
+        if cand.exists():
+            return cand
+        elif Path(track["filepath"]).exists():
+            return Path(track["filepath"])
+    if not filepath.exists() and (BASE_DIR / track["filename"]).exists():
+        return BASE_DIR / track["filename"]
+    return filepath
+
+
+def send_to_trash(filepath: Path) -> Path:
+    trash_dir = Path.home() / ".Trash"
+    trash_dir.mkdir(parents=True, exist_ok=True)
+    dest = trash_dir / filepath.name
+    if dest.exists():
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = trash_dir / f"{filepath.stem}_{timestamp}{filepath.suffix}"
+    shutil.move(str(filepath), str(dest))
+    return dest
+
+
+def remove_tracks(track_id: int = None, remove_all: bool = False, keep_file: bool = False):
+    init_db()
+    with get_db() as conn:
+        if remove_all:
+            tracks = conn.execute("SELECT * FROM tracks ORDER BY id ASC").fetchall()
+        elif track_id is not None:
+            tracks = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchall()
+        else:
+            print("[!] Specify a track ID or use --all.")
+            return
+
+        if not tracks:
+            print("[!] No matching track(s) found.")
+            return
+
+        for track in tracks:
+            tid = track["id"]
+            title = track["title"]
+            file_path = resolve_track_path(track)
+
+            trashed_info = ""
+            if not keep_file and file_path.exists():
+                try:
+                    dest = send_to_trash(file_path)
+                    trashed_info = f" (moved to Trash: {dest.name})"
+                except Exception as e:
+                    print(f"[!] Could not move file to Trash ({file_path}): {e}")
+
+            conn.execute("DELETE FROM tracks WHERE id = ?", (tid,))
+            print(f"[✓] Removed track #{tid}: '{title}'{trashed_info}")
+
+        conn.commit()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="flowloop",
@@ -469,6 +527,12 @@ def main():
     p_export.add_argument("--mood", help="Filter by mood")
     p_export.add_argument("--energy", choices=["low", "medium", "high"], help="Filter by energy")
 
+    # Command: remove
+    p_rm = subparsers.add_parser("remove", aliases=["rm", "delete"], help="Remove track from catalog and trash audio file")
+    p_rm.add_argument("id", nargs="?", type=int, help="Track ID to remove")
+    p_rm.add_argument("--all", action="store_true", help="Remove all tracks from catalog and trash audio files")
+    p_rm.add_argument("--keep-file", action="store_true", help="Keep audio file on disk and only remove from catalog database")
+
     # Default action if no sub-command provided
     if len(sys.argv) == 1:
         play_tracks(random_start=True, loop_same_track=True)
@@ -493,6 +557,8 @@ def main():
         update_tags(args.id, moods=args.moods, energy=args.energy, title=args.title)
     elif args.command == "export":
         export_playlist(args.output, mood=args.mood, energy=args.energy)
+    elif args.command in ("remove", "rm", "delete"):
+        remove_tracks(track_id=args.id, remove_all=args.all, keep_file=args.keep_file)
     else:
         parser.print_help()
 
