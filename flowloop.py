@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 __version__ = "0.1.0"
@@ -48,9 +49,18 @@ def init_db():
                 description TEXT,
                 play_count INTEGER DEFAULT 0,
                 last_played_at TEXT,
+                total_played_seconds INTEGER DEFAULT 0,
+                last_play_duration_seconds INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL
             )
         """)
+        existing_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+        }
+        if "total_played_seconds" not in existing_cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN total_played_seconds INTEGER DEFAULT 0")
+        if "last_play_duration_seconds" not in existing_cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN last_play_duration_seconds INTEGER DEFAULT 0")
         conn.commit()
 
 
@@ -258,6 +268,70 @@ def play_audio_file(filepath: Path, start_seconds: int = 0) -> bool:
         return False
 
 
+def compute_track_weight(track: sqlite3.Row, now: datetime.datetime) -> float:
+    """Compute selection weight favoring less-played and less-recently-saturated tracks."""
+    play_count = track["play_count"] or 0
+    total_played = track["total_played_seconds"] or 0
+
+    if total_played > 0:
+        usage_factor = 1.0 / (1.0 + (total_played / 3600.0))
+    elif play_count > 0:
+        usage_factor = 1.0 / (1.0 + play_count * 0.5)
+    else:
+        usage_factor = 1.0
+
+    last_played_raw = track["last_played_at"]
+    if not last_played_raw:
+        recency_factor = 1.0
+    else:
+        try:
+            last_played = datetime.datetime.fromisoformat(last_played_raw)
+            hours_since = max(0.0, (now - last_played).total_seconds() / 3600.0)
+        except ValueError:
+            hours_since = 999.0
+
+        last_dur = track["last_play_duration_seconds"] or 0
+        if last_dur == 0 and play_count > 0:
+            last_dur = 1800
+
+        exposure = min(1.0, last_dur / 7200.0)
+        cooldown_hours = 48.0 * exposure
+        if cooldown_hours <= 0.1:
+            recency_factor = 1.0
+        else:
+            min_floor = 1.0 - exposure * 0.9
+            recency_factor = max(min_floor, min(1.0, hours_since / cooldown_hours))
+
+    return max(0.01, usage_factor * recency_factor)
+
+
+def select_weighted_track(track_list: list, last_track_id: int = None):
+    """Pick a track using weighted random selection, avoiding immediate repeats."""
+    candidates = [t for t in track_list if t["id"] != last_track_id] if len(track_list) > 1 else track_list
+    now = datetime.datetime.now()
+    weights = [compute_track_weight(t, now) for t in candidates]
+    return random.choices(candidates, weights=weights, k=1)[0]
+
+
+def record_playback_stats(track_id: int, elapsed_seconds: int):
+    """Persist actual playback duration and conditionally update play_count/last_played_at."""
+    if elapsed_seconds < 10:
+        return
+
+    now_iso = datetime.datetime.now().isoformat()
+    count_increment = 1 if elapsed_seconds >= 120 else 0
+    with get_db() as conn:
+        conn.execute("""
+            UPDATE tracks
+            SET total_played_seconds = COALESCE(total_played_seconds, 0) + ?,
+                last_play_duration_seconds = ?,
+                last_played_at = ?,
+                play_count = COALESCE(play_count, 0) + ?
+            WHERE id = ?
+        """, (elapsed_seconds, elapsed_seconds, now_iso, count_increment, track_id))
+        conn.commit()
+
+
 def play_tracks(
     mood: str = None,
     energy: str = None,
@@ -267,10 +341,11 @@ def play_tracks(
     loop_same_track: bool = True
 ):
     init_db()
-    with get_db() as conn:
-        if track_id:
-            rows = conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchall()
-        else:
+
+    def fetch_matching_tracks():
+        with get_db() as conn:
+            if track_id:
+                return list(conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchall())
             query = "SELECT * FROM tracks WHERE 1=1"
             params = []
             if mood:
@@ -279,13 +354,12 @@ def play_tracks(
             if energy:
                 query += " AND energy_level = ?"
                 params.append(energy.lower())
-            rows = conn.execute(query, params).fetchall()
+            return list(conn.execute(query, params).fetchall())
 
-    if not rows:
+    track_list = fetch_matching_tracks()
+    if not track_list:
         print(f"[!] No tracks found matching criteria (mood={mood}, energy={energy}).")
         return
-
-    track_list = list(rows)
 
     print("\n" + "=" * 75)
     print(f"  🌊  FLOWLOOP — BACKGROUND MUSIC PLAYER")
@@ -301,8 +375,15 @@ def play_tracks(
     print("Controls (mpv): [Space] Pause/Play  |  [← / →] Seek ±5s  |  [q] / [Ctrl+C] Skip/Quit")
     print("=" * 75 + "\n")
 
+    last_track_id = None
+
     while True:
-        track = random.choice(track_list) if not track_id else track_list[0]
+        track_list = fetch_matching_tracks()
+        if not track_list:
+            return
+
+        track = track_list[0] if track_id else select_weighted_track(track_list, last_track_id=last_track_id)
+        last_track_id = track["id"]
 
         filepath = AUDIO_DIR / track["filename"]
         if not filepath.exists() and track["filepath"]:
@@ -330,16 +411,9 @@ def play_tracks(
         else:
             first_offset = 0
 
-        with get_db() as conn:
-            conn.execute("""
-                UPDATE tracks 
-                SET play_count = play_count + 1, last_played_at = ?
-                WHERE id = ?
-            """, (datetime.datetime.now().isoformat(), track["id"]))
-            conn.commit()
-
         current_offset = first_offset
         loop_count = 1
+        session_start = time.monotonic()
 
         while True:
             print("-" * 75)
@@ -355,12 +429,14 @@ def play_tracks(
             
             if completed:
                 if not loop_same_track:
+                    record_playback_stats(track["id"], int(round(time.monotonic() - session_start)))
                     break
                 loop_count += 1
                 current_offset = 0
                 print(f"\n[🔁] Track finished. Seamlessly repeating from the start...")
                 continue
             else:
+                record_playback_stats(track["id"], int(round(time.monotonic() - session_start)))
                 print("\n[!] Playback interrupted.")
                 try:
                     choice = input("👉 Press [ENTER] / 'p' to switch track, or 'e' to exit: ").strip().lower()
